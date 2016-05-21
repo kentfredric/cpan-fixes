@@ -1,0 +1,40 @@
+From 0e2187e0180b1db9436d36c5616e620890f38a3e Mon Sep 17 00:00:00 2001
+From: Kent Fredric <kentfredric@gmail.com>
+Date: Sat, 21 May 2016 17:34:46 +1200
+Subject: [PATCH 2/2] Patch Version to 6.04_00001
+
+---
+ lib/Carp/Clan.pm | 3 ++-
+ t/20pre560.t     | 2 +-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/lib/Carp/Clan.pm b/lib/Carp/Clan.pm
+index 555a86e..178c9ed 100644
+--- a/lib/Carp/Clan.pm
++++ b/lib/Carp/Clan.pm
+@@ -28,7 +28,8 @@ $MaxArgNums = 8;     # How many arguments to print.        0 = all.
+ 
+ $Verbose = 0;        # If true then make _shortmsg call _longmsg instead.
+ 
+-$VERSION = '6.04';
++$VERSION = '6.04_00001';
++$VERSION =~ tr/_//d;
+ 
+ # _longmsg() crawls all the way up the stack reporting on all the function
+ # calls made. The error string, $error, is originally constructed from the
+diff --git a/t/20pre560.t b/t/20pre560.t
+index bc6edd1..b27e565 100644
+--- a/t/20pre560.t
++++ b/t/20pre560.t
+@@ -31,7 +31,7 @@ unless ($@)
+ {print "ok $n\n";} else {print "not ok $n\n";}
+ $n++;
+ 
+-if ($Carp::Clan::VERSION eq '6.04')
++if ($Carp::Clan::VERSION eq '6.0400001')
+ {print "ok $n\n";} else {print "not ok $n\n";}
+ $n++;
+ 
+-- 
+2.8.2
+
