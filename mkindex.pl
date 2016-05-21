@@ -18,7 +18,7 @@ while ( my $path = $iter->() ) {
   my $relpath =$path->relative($root);
   my $size = $path->stat->size;
 
-  my $sz = sprintf "%5s", $size;
+  my $sz = sprintf "%20s", $size;
   $sz =~ s/ /&nbsp;/g;
   printf "<div style=\"font-family: monospace\">%s - <a href=\"./%s\">%s</a></div>\n", $sz, $relpath, $relpath;
 }
