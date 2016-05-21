@@ -20,7 +20,7 @@ while ( my $path = $iter->() ) {
 
   my $sz = sprintf "%5s", $size;
   $sz =~ s/ /&nbsp;/g;
-  printf "%s - <a href=\"./%s\">%s</a>\n", $sz, $relpath, $relpath;
+  printf "<div>%s - <a href=\"./%s\">%s</a></div>\n", $sz, $relpath, $relpath;
 }
 
 
