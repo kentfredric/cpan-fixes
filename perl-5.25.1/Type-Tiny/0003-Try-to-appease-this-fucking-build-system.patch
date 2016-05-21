@@ -1,0 +1,32 @@
+From 818fe2c78c5ac719490d1d9bee69f83bbe1e4e24 Mon Sep 17 00:00:00 2001
+From: Kent Fredric <kentfredric@gmail.com>
+Date: Sat, 21 May 2016 17:46:20 +1200
+Subject: [PATCH 3/3] Try to appease this fucking build system
+
+---
+ meta/changes.pret | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/meta/changes.pret b/meta/changes.pret
+index 6513ad2..a1567a8 100644
+--- a/meta/changes.pret
++++ b/meta/changes.pret
+@@ -2130,3 +2130,15 @@
+ 			label "Fix annoying warning message in test suite with recent versions of Exporter::Tiny.";
+ 		];
+ 	].
++
++`Type-Tiny 1.000005001 cpan:KENTNL`
++	issued  2016-05-21;
++	changeset [
++		dcs:versus `Type-Tiny 1.000005 cpan:TOBYINK`;
++		item [
++			a dcs:Bugfix;
++			label "Fix stupid regex shit";
++			dcs:thanks cpan:MARTIMM;
++			dcs:fixes RT#99312;
++		];
++	].
+-- 
+2.8.2
+
