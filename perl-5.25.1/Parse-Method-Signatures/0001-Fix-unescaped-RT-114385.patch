@@ -1,0 +1,26 @@
+From 8bd9fbf2a35a5862d42ea48b53ca521b6f3032b0 Mon Sep 17 00:00:00 2001
+From: Kent Fredric <kentfredric@gmail.com>
+Date: Mon, 30 May 2016 11:27:56 +1200
+Subject: [PATCH 1/2] Fix unescaped { } ( RT#114385)
+
+{ in QR now needs escaping.
+---
+ t/ppi.t | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/t/ppi.t b/t/ppi.t
+index 3b8633a..be0dd80 100644
+--- a/t/ppi.t
++++ b/t/ppi.t
+@@ -120,7 +120,7 @@ throws_ok {
+ 
+ throws_ok {
+   Parse::Method::Signatures->new(':foo( {$x, :@y])')->param(),
+-} qr/^Runaway '{}' in unpacked parameter near '{\$x, :\@y' at /,
++} qr/^Runaway '\{\}' in unpacked parameter near '\{\$x, :\@y' at /,
+   q/Runaway '{}' in unpacked parameter near '{$x, :@y' at /;
+ 
+ test_param(
+-- 
+2.8.3
+

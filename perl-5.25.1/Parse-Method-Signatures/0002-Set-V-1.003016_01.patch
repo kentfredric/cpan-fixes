@@ -1,0 +1,25 @@
+From 03f289504c5905b1572a27d46f8ce7bd9f025f3a Mon Sep 17 00:00:00 2001
+From: Kent Fredric <kentfredric@gmail.com>
+Date: Mon, 30 May 2016 11:29:03 +1200
+Subject: [PATCH 2/2] Set V=1.003016_01
+
+---
+ lib/Parse/Method/Signatures.pm | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/Parse/Method/Signatures.pm b/lib/Parse/Method/Signatures.pm
+index 9d25577..2e87804 100644
+--- a/lib/Parse/Method/Signatures.pm
++++ b/lib/Parse/Method/Signatures.pm
+@@ -16,7 +16,7 @@ use Parse::Method::Signatures::Types qw/
+ use Carp qw/croak/;
+ 
+ use namespace::clean -except => 'meta';
+-our $VERSION = '1.003016';
++our $VERSION = '1.003016_01';
+ our $ERROR_LEVEL = 0;
+ our %LEXTABLE;
+ our $DEBUG = $ENV{PMS_DEBUG} || 0;
+-- 
+2.8.3
+
