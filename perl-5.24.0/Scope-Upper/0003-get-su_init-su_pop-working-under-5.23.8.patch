@@ -1,0 +1,689 @@
+From 245d07367dfe5946c7f7112edf562508558f8b5d Mon Sep 17 00:00:00 2001
+From: David Mitchell <davem@iabyn.com>
+Date: Mon, 16 May 2016 13:38:21 +0100
+Subject: [PATCH 3/9] get su_init/su_pop working under 5.23.8
+
+In 5.23.8 there are two big differences to the way perl's context system
+manipulates the savestack. Firstly, pushing a scope no longer does one or
+two ENTER's instead the old value of PL_savestack_ix is stored as
+cx->blk_oldsaveix. This means that the boundaries of savestack frames are
+now not only specified as scopestack entries, but also as blk_oldsaveix
+entries.
+
+Secondly, most values that need restoring are saved in new fields in the
+CX structure rather than being pushed on the savestack; this means that it
+is quite likely that two nested scopes can share the same savestack index.
+
+This commit gets all the test scripts working that mainly test the
+savestack manipulation code (su_init and su_pop).
+
+It does this by:
+
+*) allowing the offset by which a savestack frame boundary is adjusted to
+be variable (rather than always SU_SAVE_DESTRUCTOR_SIZE), and by turning
+the origin array into an array of structs, one field of which is the
+offset for that depth. This allows multiple empty savestack frames
+to all trigger, by ensuring that each adjusted boundary is higher than the
+previous.
+
+*) padding the savestack using SAVEt_ALLOC, which allows a variable-sized
+chunk of savestack to be reserved, with minimal overhead during scope exit.
+
+In addition,
+
+*) the various SU_SAVE_AELEM_SIZE type macros have been rationalised and
+better commented;
+*) debugging output for su_init and su_pop has been improved
+*) the names of context types (for debugging) have been updated for 5.23.8
+and some errors fixes for older perl versions
+---
+ Upper.xs | 491 +++++++++++++++++++++++++++++++++++++++++----------------------
+ 1 file changed, 322 insertions(+), 169 deletions(-)
+
+diff --git a/Upper.xs b/Upper.xs
+index efc799a..34edf04 100644
+--- a/Upper.xs
++++ b/Upper.xs
+@@ -446,7 +446,6 @@ typedef struct {
+ /* --- Global data --------------------------------------------------------- */
+ 
+ typedef struct {
+- char               *stack_placeholder;
+  su_unwind_storage   unwind_storage;
+  su_yield_storage    yield_storage;
+  su_uplevel_storage  uplevel_storage;
+@@ -480,46 +479,64 @@ static void xsh_user_clone(pTHX_ const xsh_user_cxt_t *old_cxt, xsh_user_cxt_t *
+ 
+ /* --- Stack manipulations ------------------------------------------------- */
+ 
+-#define SU_SAVE_PLACEHOLDER() save_pptr(&XSH_CXT.stack_placeholder)
++/* how many slots on the save stack various save types take up */
+ 
+-#define SU_SAVE_DESTRUCTOR_SIZE  3
+-#define SU_SAVE_PLACEHOLDER_SIZE 3
++#define SU_SAVE_DESTRUCTOR_SIZE 3 /* SAVEt_DESTRUCTOR_X */
++#define SU_SAVE_SCALAR_SIZE     3 /* SAVEt_SV */
++#define SU_SAVE_ARY_SIZE        3 /* SAVEt_AV */
++#define SU_SAVE_AELEM_SIZE      4 /* SAVEt_AELEM */
++#define SU_SAVE_HASH_SIZE       3 /* SAVEt_HV */
++#define SU_SAVE_HELEM_SIZE      4 /* SAVEt_HELEM */
++#define SU_SAVE_HDELETE_SIZE    4 /* SAVEt_DELETE */
+ 
+-#define SU_SAVE_SCALAR_SIZE 3
++#define SU_SAVE_GVCV_SIZE       SU_SAVE_DESTRUCTOR_SIZE
++
++/* the overhead of save_alloc() but not including any elements,
++ * of which there must be at least 1 */
++#if XSH_HAS_PERL(5, 14, 0)
++# define SU_SAVE_ALLOC_SIZE      1 /* SAVEt_ALLOC */
++#else
++# define SU_SAVE_ALLOC_SIZE      2 /* SAVEt_ALLOC */
++#endif
+ 
+-#define SU_SAVE_ARY_SIZE      3
+-#define SU_SAVE_AELEM_SIZE    4
+ #ifdef SAVEADELETE
+-# define SU_SAVE_ADELETE_SIZE 3
++# define SU_SAVE_ADELETE_SIZE   3 /* SAVEt_ADELETE */
+ #else
+-# define SU_SAVE_ADELETE_SIZE SU_SAVE_DESTRUCTOR_SIZE
++# define SU_SAVE_ADELETE_SIZE   SU_SAVE_DESTRUCTOR_SIZE
++#endif
++
++/* (NB: it was 4 between 5.13.1 and 5.13.7) */
++#if XSH_HAS_PERL(5, 8, 9)
++# define SU_SAVE_GP_SIZE        3 /* SAVEt_GP */
++# else
++# define SU_SAVE_GP_SIZE        6 /* SAVEt_GP */
+ #endif
++
++/* sometimes we don't know in advance whether we're saving or deleting
++ * an array/hash element. So include enough room for a variable-sized
++ * save_alloc() to pad it to a fixed size.
++ */
++
+ #if SU_SAVE_AELEM_SIZE < SU_SAVE_ADELETE_SIZE
+-# define SU_SAVE_AELEM_OR_ADELETE_SIZE SU_SAVE_ADELETE_SIZE
++# define SU_SAVE_AELEM_OR_ADELETE_SIZE \
++    (SU_SAVE_ADELETE_SIZE + SU_SAVE_ALLOC_SIZE + 1)
++#elif SU_SAVE_AELEM_SIZE > SU_SAVE_ADELETE_SIZE
++# define SU_SAVE_AELEM_OR_ADELETE_SIZE \
++    (SU_SAVE_AELEM_SIZE + SU_SAVE_ALLOC_SIZE + 1)
+ #else
+ # define SU_SAVE_AELEM_OR_ADELETE_SIZE SU_SAVE_AELEM_SIZE
+ #endif
+ 
+-#define SU_SAVE_HASH_SIZE    3
+-#define SU_SAVE_HELEM_SIZE   4
+-#define SU_SAVE_HDELETE_SIZE 4
+ #if SU_SAVE_HELEM_SIZE < SU_SAVE_HDELETE_SIZE
+-# define SU_SAVE_HELEM_OR_HDELETE_SIZE SU_SAVE_HDELETE_SIZE
++# define SU_SAVE_HELEM_OR_HDELETE_SIZE \
++    (SU_SAVE_HDELETE_SIZE + SU_SAVE_ALLOC_SIZE + 1)
++#elif SU_SAVE_HELEM_SIZE > SU_SAVE_HDELETE_SIZE
++# define SU_SAVE_HELEM_OR_HDELETE_SIZE \
++    (SU_SAVE_HELEM_SIZE + SU_SAVE_ALLOC_SIZE + 1)
+ #else
+ # define SU_SAVE_HELEM_OR_HDELETE_SIZE SU_SAVE_HELEM_SIZE
+ #endif
+ 
+-#define SU_SAVE_GVCV_SIZE SU_SAVE_DESTRUCTOR_SIZE
+-
+-#if !XSH_HAS_PERL(5, 8, 9)
+-# define SU_SAVE_GP_SIZE 6
+-#elif !XSH_HAS_PERL(5, 13, 0) || (SU_RELEASE && XSH_HAS_PERL_EXACT(5, 13, 0))
+-# define SU_SAVE_GP_SIZE 3
+-#elif !XSH_HAS_PERL(5, 13, 8)
+-# define SU_SAVE_GP_SIZE 4
+-#else
+-# define SU_SAVE_GP_SIZE 3
+-#endif
+ 
+ #ifndef SvCANEXISTDELETE
+ # define SvCANEXISTDELETE(sv) \
+@@ -701,17 +718,21 @@ static void su_save_gvcv(pTHX_ GV *gv) {
+ /* --- Actions ------------------------------------------------------------- */
+ 
+ typedef struct {
++ I32  orig_ix; /* original savestack_ix */
++ I32  offset;  /* how much we bumped this savestack index */
++} su_ud_origin_elem;
++
++typedef struct {
+  U8   type;
+  U8   private;
+- U8   pad;
+  /* spare */
+  I32  depth;
+- I32 *origin;
++ su_ud_origin_elem *origin;
+ } su_ud_common;
+ 
++
+ #define SU_UD_TYPE(U)    (((su_ud_common *) (U))->type)
+ #define SU_UD_PRIVATE(U) (((su_ud_common *) (U))->private)
+-#define SU_UD_PAD(U)     (((su_ud_common *) (U))->pad)
+ #define SU_UD_DEPTH(U)   (((su_ud_common *) (U))->depth)
+ #define SU_UD_ORIGIN(U)  (((su_ud_common *) (U))->origin)
+ 
+@@ -889,6 +910,15 @@ static void su_localize(pTHX_ void *ud_) {
+  if (SvTYPE(sv) >= SVt_PVGV) {
+   gv = (GV *) sv;
+  } else {
++
++/* new perl context implementation frees savestack *before* restoring
++ * PL_curcop. Temporarily restore it prematurely to make gv_fetch*
++ * looks up unqualified var names in the caller's package */
++#ifdef SU_HAS_NEW_CXT
++  COP *old_cop = PL_curcop;
++  PL_curcop = CX_CUR()->blk_oldcop;
++#endif
++
+ #ifdef gv_fetchsv
+   gv = gv_fetchsv(sv, GV_ADDMULTI, t);
+ #else
+@@ -896,13 +926,16 @@ static void su_localize(pTHX_ void *ud_) {
+   const char *name = SvPV_const(sv, len);
+   gv = gv_fetchpvn_flags(name, len, GV_ADDMULTI, t);
+ #endif
++#ifdef SU_HAS_NEW_CXT
++  CX_CUR()->blk_oldcop = PL_curcop;
++#endif
+  }
+ 
+  XSH_D({
+   SV *z = newSV(0);
+   SvUPGRADE(z, t);
+-  su_debug_log("%p: === localize a %s\n",ud, sv_reftype(z, 0));
+-  su_debug_log("%p: depth=%2d scope_ix=%2d save_ix=%2d\n",
++  su_debug_log("%p:     === localize a %s\n",ud, sv_reftype(z, 0));
++  su_debug_log("%p:         depth=%2d scope_ix=%2d save_ix=%2d\n",
+                 ud, SU_UD_DEPTH(ud), PL_scopestack_ix, PL_savestack_ix);
+   SvREFCNT_dec(z);
+  });
+@@ -966,35 +999,48 @@ static void su_uid_drop(pTHX_ void *ud_) {
+ #ifdef DEBUGGING
+ # define SU_CXNAME(C) PL_block_type[CxTYPE(C)]
+ #else
+-# if XSH_HAS_PERL(5, 11, 0)
++# if XSH_HAS_PERL(5, 23, 8)
+ static const char *su_block_type[] = {
+  "NULL",
+  "WHEN",
+  "BLOCK",
+  "GIVEN",
+- "LOOP_FOR",
+- "LOOP_PLAIN",
++ "LOOP_ARY",
+  "LOOP_LAZYSV",
+  "LOOP_LAZYIV",
++ "LOOP_LIST",
++ "LOOP_PLAIN",
+  "SUB",
+  "FORMAT",
+  "EVAL",
+  "SUBST"
+ };
+-# elif XSH_HAS_PERL(5, 9, 3)
++# elif XSH_HAS_PERL(5, 11, 0)
+ static const char *su_block_type[] = {
+  "NULL",
+- "SUB",
+- "EVAL",
+  "WHEN",
+- "SUBST",
+  "BLOCK",
+- "FORMAT",
+  "GIVEN",
+  "LOOP_FOR",
+  "LOOP_PLAIN",
+  "LOOP_LAZYSV",
+- "LOOP_LAZYIV"
++ "LOOP_LAZYIV",
++ "SUB",
++ "FORMAT",
++ "EVAL",
++ "SUBST"
++};
++# elif XSH_HAS_PERL(5, 10, 0)
++static const char *su_block_type[] = {
++ "NULL",
++ "SUB",
++ "EVAL",
++ "LOOP",
++ "SUBST",
++ "BLOCK",
++ "FORMAT"
++ "WHEN",
++ "GIVEN"
+ };
+ # else
+ static const char *su_block_type[] = {
+@@ -1003,78 +1049,105 @@ static const char *su_block_type[] = {
+  "EVAL",
+  "LOOP",
+  "SUBST",
+- "BLOCK"
++ "BLOCK",
++ "FORMAT"
+ };
+ # endif
+ # define SU_CXNAME(C) su_block_type[CxTYPE(C)]
+ #endif
+ 
+-static void su_pop(pTHX_ void *ud) {
+-#define su_pop(U) su_pop(aTHX_ (U))
+- I32 depth, base, mark, *origin;
+- depth = SU_UD_DEPTH(ud);
++/* for debugging. These indicate how many ENTERs each context type
++ * does before the PUSHBLOCK */
+ 
++static const int su_cxt_enter_count[] = {
++# if XSH_HAS_PERL(5, 23, 8)
++  0 /* context pushes no longer do ENTERs */
++# elif XSH_HAS_PERL(5, 11, 0)
++ /* NULL WHEN BLOCK GIVEN LOOP_FOR LOOP_PLAIN LOOP_LAZYSV
++  * LOOP_LAZYIV SUB FORMAT EVAL SUBST */
++ 0, 1, 1, 1, 2, 2, 2, 2, 1, 1, 1, 0
++# elif XSH_HAS_PERL(5, 10, 0)
++ /* NULL SUB EVAL LOOP SUBST BLOCK FORMAT WHEN GIVEN */
++ 0, 1, 1, 2, 0, 1, 1, 1, 1
++# else
++ /* NULL SUB EVAL LOOP SUBST BLOCK FORMAT */
++ 0, 1, 1, 2, 0, 1, 1
++# endif
++};
++
++
++
++/* push at least 'size' slots worth of padding onto the savestack */
++
++static void su_ss_push_padding(pTHX_ void *ud, I32 size) {
++ if (size <= 0)
++  return;
++ if (size < SU_SAVE_ALLOC_SIZE + 1) /* minimum possible SAVEt_ALLOC */
++  size = SU_SAVE_ALLOC_SIZE + 1;
+  XSH_D(su_debug_log(
+-  "%p: --- pop a %s\n"
+-  "%p: leave scope     at depth=%2d scope_ix=%2d cur_top=%2d cur_base=%2d\n",
+-   ud, SU_CXNAME(cxstack + cxstack_ix),
+-   ud, depth, PL_scopestack_ix,PL_savestack_ix,PL_scopestack[PL_scopestack_ix]
+- ));
++        "%p:     push %2d padding at save_ix=%d\n",
++         ud, size, PL_savestack_ix));
++ save_alloc((size - SU_SAVE_ALLOC_SIZE)*sizeof(*PL_savestack), 0);
++}
+ 
+- origin = SU_UD_ORIGIN(ud);
+- mark   = origin[depth];
+- base   = origin[depth - 1];
+ 
+- XSH_D(su_debug_log("%p: original scope was %*c top=%2d     base=%2d\n",
+-                     ud,                24, ' ',    mark,        base));
++static void su_pop(pTHX_ void *ud);
+ 
+- if (base < mark) {
+-#if XSH_HAS_PERL(5, 19, 4)
+-  I32 save = -1;
+-  PERL_CONTEXT *cx;
+-#endif
+ 
+-  XSH_D(su_debug_log("%p: clear leftovers\n", ud));
+ 
+-#if XSH_HAS_PERL(5, 19, 4)
+-  cx = cxstack + cxstack_ix;
+-  if (CxTYPE(cx) == CXt_SUB || CxTYPE(cx) == CXt_FORMAT)
+-   save = PL_scopestack[cx->blk_oldscopesp - 1];
+-#endif
++/* push an su_pop destructor onto the savestack with suitable padding.
++ * first indicates that this is the first push of a destructor */
+ 
+-  PL_savestack_ix = mark;
+-  leave_scope(base);
++static void su_ss_push_destructor(pTHX_ void *ud, I32 depth, bool first) {
++ su_ud_origin_elem *origin = SU_UD_ORIGIN(ud);
++ I32 pad;
+ 
+-#if XSH_HAS_PERL(5, 19, 4)
+-  if (CxTYPE(cx) == CXt_SUB || CxTYPE(cx) == CXt_FORMAT)
+-   PL_scopestack[cx->blk_oldscopesp - 1] = save;
+-#endif
++ assert(first || origin[depth+1].orig_ix == PL_savestack_ix);
++ su_ss_push_padding(aTHX_ ud,
++    (origin[depth].orig_ix + origin[depth].offset) - PL_savestack_ix);
++ XSH_D(su_debug_log(
++        "%p:     push destructor at save_ix=%d depth=%d scope_ix=%d\n",
++         ud, PL_savestack_ix, depth, PL_scopestack_ix));
++ SAVEDESTRUCTOR_X(su_pop, ud);
++ assert(first ||
++        PL_savestack_ix <= origin[depth+1].orig_ix +  origin[depth+1].offset);
++}
++
++
++/* this is called during each leave_scope() via SAVEDESTRUCTOR_X */
++
++static void su_pop(pTHX_ void *ud) {
++#define su_pop(U) su_pop(aTHX_ (U))
++ I32 depth, base, mark;
++ su_ud_origin_elem *origin;
++
++ depth  = SU_UD_DEPTH(ud);
++ origin = SU_UD_ORIGIN(ud);
++
++ XSH_D(su_debug_log( "%p: ### su_pop: depth=%d\n", ud, depth));
++
++ depth--;
++ mark = PL_savestack_ix;
++ base = origin[depth].orig_ix;
++
++ XSH_D(su_debug_log("%p:     residual savestack frame is %d(+%d)..%d\n",
++                     ud, base, origin[depth].offset, mark));
++
++ if (base < mark) {
++  XSH_D(su_debug_log("%p:     clear leftovers at %d..%d\n", ud, base, mark));
++  leave_scope(base);
+  }
+- PL_savestack_ix = base;
++ assert(PL_savestack_ix == base);
+ 
+- SU_UD_DEPTH(ud) = --depth;
++ SU_UD_DEPTH(ud) = depth;
+ 
+  if (depth > 0) {
+-  U8 pad;
+-
+-  if ((pad = SU_UD_PAD(ud)) > 0) {
+-   dXSH_CXT;
+-   do {
+-    XSH_D(su_debug_log(
+-          "%p: push a pad slot at depth=%2d scope_ix=%2d save_ix=%2d\n",
+-           ud,                       depth, PL_scopestack_ix, PL_savestack_ix));
+-    SU_SAVE_PLACEHOLDER();
+-   } while (--pad);
+-  }
+-
+-  XSH_D(su_debug_log(
+-        "%p: push destructor at depth=%2d scope_ix=%2d save_ix=%2d\n",
+-         ud,                        depth, PL_scopestack_ix, PL_savestack_ix));
+-  SAVEDESTRUCTOR_X(su_pop, ud);
++  su_ss_push_destructor(aTHX_ ud, depth-1, 0);
+  } else {
++  I32 offset = origin[0].offset; /* grab value before origin is freed */
+   switch (SU_UD_TYPE(ud)) {
+    case SU_UD_TYPE_REAP: {
+-    XSH_D(su_debug_log("%p: === reap\n%p: depth=%2d scope_ix=%2d save_ix=%2d\n",
++    XSH_D(su_debug_log("%p:     === reap\n%p: depth=%d scope_ix=%d save_ix=%d\n",
+                    ud, ud, SU_UD_DEPTH(ud), PL_scopestack_ix, PL_savestack_ix));
+     SAVEDESTRUCTOR_X(su_call, SU_UD_REAP_CB(ud));
+     SU_UD_FREE(ud);
+@@ -1088,100 +1161,181 @@ static void su_pop(pTHX_ void *ud) {
+     SAVEDESTRUCTOR_X(su_uid_drop, ud);
+     break;
+   }
++  /* perl 5.23.8 onwards is very fussy about the return from leave_scope()
++   * leaving PL_savestack_ix where it expects it to be */
++  if (PL_savestack_ix < base + offset) {
++   I32 gap = (base + offset) - PL_savestack_ix;
++   assert(gap >= SU_SAVE_ALLOC_SIZE + 1);
++   su_ss_push_padding(aTHX_ ud, gap);
++  }
++  assert(PL_savestack_ix == base + offset);
+  }
+ 
+- XSH_D(su_debug_log("%p: --- end pop: cur_top=%2d == cur_base=%2d\n",
+-                     ud, PL_savestack_ix, PL_scopestack[PL_scopestack_ix]));
++ XSH_D(su_debug_log("%p:     end pop: ss_ix=%d\n", ud, PL_savestack_ix));
+ }
+ 
++
+ /* --- Initialize the stack and the action userdata ------------------------ */
+ 
+-static I32 su_init(pTHX_ void *ud, I32 cxix, I32 size) {
++static void su_init(pTHX_ void *ud, I32 cxix, I32 size) {
+ #define su_init(U, C, S) su_init(aTHX_ (U), (C), (S))
+- I32 i, depth, offset, base, *origin;
+- U8 pad;
+-
+- XSH_D(su_debug_log("%p: ### init for cx %d\n", ud, cxix));
+-
+- /* su_pop() is going to be called from leave_scope(), so before pushing the
+-  * next callback, we'll want to flush the current scope stack slice first.
+-  * However, if we want the next callback not to be processed immediately by
+-  * the current leave_scope(), we'll need to hide it by artificially
+-  * incrementing the scope stack marker before. For the intermediate bumps,
+-  * we will only need a bump of SU_SAVE_DESTRUCTOR_SIZE items, but for the
+-  * last one we will need a bump of size items. However, in order to preserve
+-  * the natural ordering between scope stack markers, we cannot bump lower
+-  * markers more than higher ones. This is why we bump the intermediate markers
+-  * by the smallest multiple of SU_SAVE_PLACEHOLDER_SIZE greater or equal to
+-  * max(SU_SAVE_DESTRUCTOR_SIZE, size). */
+-
+- if (size <= SU_SAVE_DESTRUCTOR_SIZE) {
+-  pad = 0;
+- } else {
+-  I32 extra = size - SU_SAVE_DESTRUCTOR_SIZE;
+-  pad = extra / SU_SAVE_PLACEHOLDER_SIZE;
+-  if (extra % SU_SAVE_PLACEHOLDER_SIZE)
+-   ++pad;
+- }
+- offset = SU_SAVE_DESTRUCTOR_SIZE + SU_SAVE_PLACEHOLDER_SIZE * pad;
+- XSH_D(su_debug_log("%p: size=%d pad=%d offset=%d\n", ud, size, pad, offset));
++ I32 i, depth, base;
++ su_ud_origin_elem *origin;
++ I32 cur_cx_ix;
++ I32 cur_scope_ix;
++
++ XSH_D(su_debug_log("%p: ### su_init(cxix=%d, size=%d)\n", ud, cxix, size));
+ 
+  depth = PL_scopestack_ix - cxstack[cxix].blk_oldscopesp;
+- XSH_D(su_debug_log("%p: going down to depth %d\n", ud, depth));
+-
+- /* We need to bump all the intermediary stack markers just in case an
+-  * exception is thrown before the target scope is reached. Indeed, in this
+-  * case there might be arbitrary many scope frames flushed at the same time,
+-  * and since we cannot know in advance whether this will happen or not, we
+-  * have to make sure the final frame is protected for the actual action. But
+-  * of course, in order to do that, we also need to bump all the previous stack
+-  * markers. If not for this, it should have been possible to just bump the two
+-  * next frames in su_pop(). */
+-
+- Newx(origin, depth + 1, I32);
+- base = PL_scopestack_ix - depth;
+- origin[0] = PL_scopestack[base];
+- PL_scopestack[base] += size;
+- for (i = 1; i < depth; ++i) {
+-  I32 j = i + base;
+-  /* origin[depth - i] == PL_scopestack[PL_scopestack_ix - i] */
+-  origin[i] = PL_scopestack[j];
+-  PL_scopestack[j] += offset;
+- }
+- origin[depth] = PL_savestack_ix;
++#ifdef SU_HAS_NEW_CXT
++ depth += (cxstack_ix - cxix); /* each context frame holds 1 scope */
++#endif
++ XSH_D(su_debug_log(
++   "%p:     going down by depth=%d with scope_ix=%d save_ix=%d\n",
++    ud, depth, PL_scopestack_ix, PL_savestack_ix));
++
++ /* Artificially increase the position of each savestack frame boundary
++  * to make space to squeeze in a 'size' sized entry (first one) or a
++  * SU_SAVE_DESTRUCTOR_SIZE sized entry (higher ones). In addition, make
++  * sure that each boundary is higher than the previous, so that *every*
++  * scope exit triggers a call to leave_scope(). Each scope exit will call
++  * the su_pop() destructor, which is responsible for: freeing any
++  * savestack entries below the artificially raised floor; then pushing a
++  * new destructor in that space. On the final pop, the "real" savestack
++  * action is pushed rather than another destructor.
++  *
++  * On older perls, savestack frame boundaries are specified by a range of
++  * scopestack entries (one per ENTER). Each scope entry typically does
++  * one or two ENTERs followed by a PUSHBLOCK. Thus the
++  * cx->blku_oldscopesp field set by the PUSHBLOCK points to the next free
++  * slot, which is one above the last of the ENTERs. In the debugging
++  * output we indicate that by bracketing the ENTERs directly preceding
++  * that context push with dashes, e.g.:
++  *
++  *   13b98d8:     ------------------
++  *   13b98d8:                 ENTER origin[0] scope[3] savestack=3+3
++  *   13b98d8:                 ENTER origin[1] scope[4] savestack=9+3
++  *   13b98d8:     cx=1  LOOP_LAZYIV
++  *   13b98d8:     ------------------
++  *
++  * In addition to context stack pushes, other activities can push ENTERs
++  * too, such as grep expr and XS sub calls.
++  *
++  * For newer perls (SU_HAS_NEW_CXT), a context push no longer does any
++  * ENTERs; instead the old savestack position is stored in the new
++  * cx->blk_oldsaveix field; thus this field specifies an additional
++  * savestack frame boundary point in addition to the scopestack entries,
++  * and will also need adjusting.
++  *
++  * We record the original and modified position of each boundary in the
++  * origin array.
++  *
++  * The passed cxix argument represents the scope we wish to inject into;
++  * we have to adjust all the savestack frame boundaries above (but not
++  * including) that context. 
++  */
++
++ Newx(origin, depth, su_ud_origin_elem);
++
++ cur_cx_ix  = cxix;
++ cur_scope_ix = cxstack[cxix].blk_oldscopesp;
++#ifdef SU_HAS_NEW_CXT
++ XSH_D(su_debug_log("%p:     cx=%-2d %-11s\n",
++      ud, cur_cx_ix, SU_CXNAME(cxstack+cur_cx_ix)));
++ cur_cx_ix++;
++#endif
++
++ for (i = 0; cur_scope_ix < PL_scopestack_ix; i++) {
++  I32 *ixp;
++  I32 offset;
++
++#ifdef SU_HAS_NEW_CXT
++
++  if (   cur_cx_ix <= cxstack_ix
++      && cur_scope_ix == cxstack[cur_cx_ix].blk_oldscopesp
++  )
++   ixp = &(cxstack[cur_cx_ix++].blk_oldsaveix);
++  else
++   ixp = &PL_scopestack[cur_scope_ix++]; /* an ENTER pushed after cur context */
+ 
+- SU_UD_PAD(ud)    = pad;
+- SU_UD_DEPTH(ud)  = depth;
+- SU_UD_ORIGIN(ud) = origin;
++#else
++
++  XSH_D({
++   if (cur_cx_ix <= cxstack_ix) {
++    if (cur_scope_ix == cxstack[cur_cx_ix].blk_oldscopesp) {
++     su_debug_log(
++       "%p:     cx=%-2d %s\n%p:     ------------------\n",
++       ud, cur_cx_ix, SU_CXNAME(cxstack+cur_cx_ix), ud);
++     cur_cx_ix++;
++    }
++    else if (cur_scope_ix + su_cxt_enter_count[CxTYPE(cxstack+cur_cx_ix)]
++             == cxstack[cur_cx_ix].blk_oldscopesp)
++     su_debug_log("%p:     ------------------\n", ud);
++   }
++  });
++  ixp = &PL_scopestack[cur_scope_ix++];
++
++#endif
++
++  if (i == 0)
++   offset = size;
++  else {
++   /* we have three constraints to satisfy:
++    * 1) Each adjusted offset must be at least SU_SAVE_DESTRUCTOR_SIZE
++    *    above its unadjusted boundary, so that there is space to inject a
++    *    destructor into the outer scope.
++    * 2) Each adjusted boundary must be at least SU_SAVE_DESTRUCTOR_SIZE
++    *    higher than the previous adjusted boundary, so that a new
++    *    destructor can be added below the Nth adjusted frame boundary,
++    *    but be within the (N-1)th adjusted frame and so be triggered on
++    *    the next scope exit;
++    * 3) If the adjustment needs to be greater than SU_SAVE_DESTRUCTOR_SIZE,
++    *    then it should be greater by an amount of at least the minimum
++    *    pad side, so a destructor and padding can be pushed.
++    */
++   I32 pad;
++   offset = SU_SAVE_DESTRUCTOR_SIZE; /* rule 1 */
++   pad = (origin[i-1].orig_ix + origin[i-1].offset) + offset - (*ixp + offset);
++   if (pad > 0) { /* rule 2 */
++    if (pad < SU_SAVE_ALLOC_SIZE + 1) /* rule 3 */
++     pad = SU_SAVE_ALLOC_SIZE + 1;
++    offset += pad;
++   }
++  }
++
++  origin[i].offset = offset;
++  origin[i].orig_ix = *ixp;
++  *ixp += offset;
++
++#ifdef SU_HAS_NEW_CXT
++  XSH_D({
++   if (ixp == &PL_scopestack[cur_scope_ix-1])
++    su_debug_log(
++     "%p:           ENTER       origin[%d] scope[%d] savestack=%d+%d\n",
++      ud, i, cur_scope_ix, origin[i].orig_ix, origin[i].offset);
++   else
++    su_debug_log(
++     "%p:     cx=%-2d %-11s origin[%d] scope[%d] savestack=%d+%d\n",
++      ud, cur_cx_ix-1, SU_CXNAME(cxstack+cur_cx_ix-1),
++      i, cur_scope_ix, origin[i].orig_ix, origin[i].offset);
++  });
++#else
++  XSH_D(su_debug_log(
++    "%p:                 ENTER origin[%d] scope[%d] savestack=%d+%d\n",
++     ud, i, cur_scope_ix, origin[i].orig_ix, origin[i].offset));
++#endif
+ 
+- /* Make sure the first destructor fires by pushing enough fake slots on the
+-  * stack. */
+- if (PL_savestack_ix + SU_SAVE_DESTRUCTOR_SIZE
+-                                       <= PL_scopestack[PL_scopestack_ix - 1]) {
+-  dXSH_CXT;
+-  do {
+-   XSH_D(su_debug_log("%p: push a fake slot      at scope_ix=%2d save_ix=%2d\n",
+-                       ud,                  PL_scopestack_ix, PL_savestack_ix));
+-   SU_SAVE_PLACEHOLDER();
+-  } while (PL_savestack_ix + SU_SAVE_DESTRUCTOR_SIZE
+-                                        <= PL_scopestack[PL_scopestack_ix - 1]);
+  }
+- XSH_D(su_debug_log("%p: push first destructor at scope_ix=%2d save_ix=%2d\n",
+-                     ud,                    PL_scopestack_ix, PL_savestack_ix));
+- SAVEDESTRUCTOR_X(su_pop, ud);
+ 
+- XSH_D({
+-  for (i = 0; i <= depth; ++i) {
+-   I32 j = PL_scopestack_ix  - i;
+-   su_debug_log("%p: depth=%2d scope_ix=%2d saved_floor=%2d new_floor=%2d\n",
+-                 ud,         i,           j, origin[depth - i],
+-                                   i == 0 ? PL_savestack_ix : PL_scopestack[j]);
+-  }
+- });
++ assert(i == depth);
+ 
+- return depth;
++ SU_UD_DEPTH(ud)  = depth;
++ SU_UD_ORIGIN(ud) = origin;
++
++ su_ss_push_destructor(aTHX_ ud, depth-1, 1);
+ }
+ 
++
+ /* --- Unwind stack -------------------------------------------------------- */
+ 
+ static void su_unwind(pTHX_ void *ud_) {
+@@ -2273,7 +2427,6 @@ static void xsh_user_global_setup(pTHX) {
+ }
+ 
+ static void xsh_user_local_setup(pTHX_ xsh_user_cxt_t *cxt) {
+- cxt->stack_placeholder = NULL;
+ 
+  /* NewOp() calls calloc() which just zeroes the memory with memset(). */
+  Zero(&(cxt->unwind_storage.return_op), 1, LISTOP);
+-- 
+2.8.3
+

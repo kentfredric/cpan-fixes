@@ -1,0 +1,37 @@
+From 3b7f681ee84f8a5c247771f7cab0ffd53c829f29 Mon Sep 17 00:00:00 2001
+From: David Mitchell <davem@iabyn.com>
+Date: Thu, 19 May 2016 12:03:48 +0100
+Subject: [PATCH 5/9] su_uplevel: populate lower stack frames properly
+
+When creating a temporary new argument stack, su_uplevel() copies most of
+the old stack to a new one. This isn't really needed, as the new stack
+will be abandoned before it ever pops back to that level.  But it *is*
+needed when debugging code prints out the stack, as in for example,
+'perl -Dstv'.
+
+However, the code didn't actually copy the old stack: it copied garbage
+instead, since it was using PL_curstack rather than AvARRAY(PL_curstack)
+as the address of of the old stack. Which was causing 'perl -Dstv' to
+SEGV.
+
+This commit fixes that.
+---
+ Upper.xs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Upper.xs b/Upper.xs
+index f6e678d..f7698d8 100644
+--- a/Upper.xs
++++ b/Upper.xs
+@@ -1984,7 +1984,7 @@ static I32 su_uplevel(pTHX_ CV *callback, I32 cxix, I32 args) {
+   * target context, plus the forthcoming arguments. */
+  new_mark = cx->blk_oldsp;
+  av_extend(si->si_stack, new_mark + 1 + args + 1);
+- Copy(PL_curstack, AvARRAY(si->si_stack), new_mark + 1, SV *);
++ Copy(AvARRAY(PL_curstack), AvARRAY(si->si_stack), new_mark + 1, SV *);
+  AvFILLp(si->si_stack) = new_mark;
+  SU_POISON(AvARRAY(si->si_stack) + new_mark + 1, args + 1, SV *);
+ 
+-- 
+2.8.3
+
