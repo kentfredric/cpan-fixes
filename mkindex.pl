@@ -14,8 +14,11 @@ my $data = get_data(
     },
 );
 
+print "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>KENTNL's CPAN Fixes</title>";
 print render_style();
+print "</head><body>";
 print render_data($data);
+print "</body></html>";
 exit 0;
 
 sub get_data ( $dir, $rules ) {
