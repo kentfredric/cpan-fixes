@@ -2,35 +2,133 @@
 use strict;
 use warnings;
 
+use experimental "signatures";
 use Path::Tiny qw( path );
+use Path::Iterator::Rule qw();
 
-my $root = path(__FILE__)->parent;
+my $data = get_data(
+    my $root = path(__FILE__)->parent,
+    {
+        tar   => qr/\.tar\.gz$/,
+        patch => qr/\.patch$/,
+    },
+);
 
-my $iter = $root->iterator({
-  recurse => 1,
-  follow_symlinks => 0,
-});
+print render_style();
+print render_data($data);
+exit 0;
 
-while ( my $path = $iter->() ) {
-  next if $path->basename =~ qr/\A(mkindex[.]pl|index[.]html)\z/;
-  next if $root->child('.git')->subsumes($path);
-  next if $path->is_dir;
-  my $relpath =$path->relative($root);
-  my $size = $path->stat->size;
-
-  my $sz = sprintf "%20s", $size;
-  $sz =~ s/ /&nbsp;/g;
-  my $decor = "font-family: monospace;";
-  my $a_decor = "";
-  if ( $path->basename !~ /\.tar.gz$/ ) {
-    $a_decor .= "color: #999";
-  } elsif (  $path !~ /5\.25\.1/  ) {
-    $a_decor .= "color: #955";
-  }
-  if ( length $a_decor ) {
-    $a_decor = " style=\"$a_decor\"";
-  }
-  printf "<div style=\"$decor\">%s - <a href=\"./%s\"${a_decor}>%s</a></div>\n", $sz, $relpath, $relpath;
+sub get_data ( $dir, $rules ) {
+    my %struct = ();
+    for my $package ( get_packages($dir) ) {
+        $struct{$package} = classify_files( [ get_files($package) ], $rules );
+    }
+    return \%struct;
 }
 
+sub get_packages( $dir ) {
+    my $rule = Path::Iterator::Rule->new();
+    $rule->skip_vcs;
+    $rule->dir;
+    $rule->min_depth(2);
+    return $rule->all($dir);
+}
+
+sub get_files( $dir ) {
+    my $frule = Path::Iterator::Rule->new();
+    $frule->file();
+    $frule->not( $frule->new->name('index.html') );
+    $frule->not( $frule->new->name('mkindex.pl') );
+    return $frule->all($dir);
+}
+
+sub classify_files ( $file_list, $rules ) {
+    my %struct = ();
+    for my $file ( @{$file_list} ) {
+        my $basename = path($file)->basename;
+        my $matched;
+        for my $rule ( keys %{$rules} ) {
+            if ( $basename =~ $rules->{$rule} ) {
+                $matched = 1;
+                push @{ $struct{$rule} ||= [] }, $file;
+                next;
+            }
+        }
+        push @{ $struct{other} ||= [] }, $file unless $matched;
+    }
+    return \%struct;
+}
+
+sub render_data( $data ) {
+    return join q[],
+      map { render_structure( $_, $data->{$_} ) } sort keys %{$data};
+}
+
+sub render_style() {
+    <<'STYLE';
+<style>
+  div, span { font-family: monospace; whitespace: pre }
+  div.package { font-size: 110%; font-weight: bold }
+  span.size { display: inline-block; width: 50px; text-align: right }
+  span.dash { display: inline-block; min-width: 10px; text-align: center; padding: 0 4px; color: #999 }
+  div.patch { margin-left: 30px; font-size: 80% }
+  .patch a { color: #999 }
+</style>
+STYLE
+
+}
+
+sub render_structure ( $name, $structure ) {
+    my $rel_dir = path($name)->relative($root);
+    my $out = render_element( 'div', $rel_dir, { class => "package" } );
+    for my $archive ( @{ $structure->{tar} || [] } ) {
+        my $relpath      = path($archive)->relative($root);
+        my $display_path = $relpath->basename;
+        $out .= render_element(
+            'div',
+            [
+                render_element(
+                    'span',
+                    path($archive)->stat->size,
+                    { class => 'size' }
+                ),
+                render_element( 'span', '-', { class => 'dash' } ),
+                render_ahref( $display_path, { href => "./$relpath" } ),
+            ],
+            { class => "file tar" }
+        );
+    }
+    for my $patch ( @{ $structure->{patch} || [] } ) {
+        my $relpath      = path($patch)->relative($root);
+        my $display_path = $relpath->basename;
+        $out .= render_element(
+            'div',
+            [
+                render_element(
+                    'span',
+                    path($patch)->stat->size,
+                    { class => 'size' }
+                ),
+                render_element( 'span', '-', { class => 'dash' } ),
+                render_ahref( $display_path, { href => "./$relpath" } ),
+            ],
+            { class => "file patch" }
+        );
+    }
+
+    return $out;
+}
+
+sub render_element ( $name, $content, $attributes ) {
+    my $attrs = join q[ ], map { sprintf "%s=\"%s\"", $_, $attributes->{$_} }
+      sort keys %{$attributes};
+    my $pad = "";
+    if ( $name eq 'div' ) { $pad = "\n" }
+    if ( ref $content eq 'ARRAY' ) { $content = join q[], @{$content} }
+    return sprintf "<%s %s>%s</%s>%s", $name, $attrs, $content, $name, $pad;
+}
+
+sub render_ahref ( $content, $attributes ) {
+    return render_element( 'a', $content, $attributes );
+}
 
