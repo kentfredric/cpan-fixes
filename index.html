@@ -6,7 +6,32 @@
   div.patch { margin-left: 30px; font-size: 80% }
   .patch a { color: #999 }
 </style>
-</head><body><div class="package">perl-5.25.1/Sereal</div>
+</head><body><pre >About:
+
+This repository / Github Pages site includes packaged dists of things to avoid
+certain problems on CPAN, in order to simply get the gears moving so that you
+can test dependents of these modules on various platforms without being hedged
+in by a failure.
+
+Installing them should be as simple as:
+
+  cpanm $PATH_TO_URI_LISTED
+
+Layout is as follows:
+
+  &lt;purpose&gt;/
+    &lt;Dist-Name&gt;/
+      &lt;SIZE&gt; - &lt;Dist-Name&gt;-&lt;VERSION&gt;.tar.gz
+        &lt;number&gt;-&lt;patchdescription&gt;.patch
+
+Where patches are applied patches where relevant.
+
+Warranty/Copyright:
+
+No warranty implied, these are strictly for integration testing of dependents.
+
+Copyrights are all deferred to individual packages. See inside for details.
+</pre><hr/><div class="package">perl-5.25.1/Sereal</div>
 <div class="file tar"><span class="size">184677</span><span class="dash">-</span><a href="./perl-5.25.1/Sereal/Sereal-3.014_001.tar.gz">Sereal-3.014_001.tar.gz</a></div>
 <div class="package">perl-5.25.1/Sereal-Decoder</div>
 <div class="file tar"><span class="size">358582</span><span class="dash">-</span><a href="./perl-5.25.1/Sereal-Decoder/Sereal-Decoder-3.014_001.tar.gz">Sereal-Decoder-3.014_001.tar.gz</a></div>

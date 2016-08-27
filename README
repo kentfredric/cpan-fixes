@@ -1,0 +1,25 @@
+About:
+
+This repository / Github Pages site includes packaged dists of things to avoid
+certain problems on CPAN, in order to simply get the gears moving so that you
+can test dependents of these modules on various platforms without being hedged
+in by a failure.
+
+Installing them should be as simple as:
+
+  cpanm $PATH_TO_URI_LISTED
+
+Layout is as follows:
+
+  <purpose>/
+    <Dist-Name>/
+      <SIZE> - <Dist-Name>-<VERSION>.tar.gz
+        <number>-<patchdescription>.patch
+
+Where patches are applied patches where relevant.
+
+Warranty/Copyright:
+
+No warranty implied, these are strictly for integration testing of dependents.
+
+Copyrights are all deferred to individual packages. See inside for details.

@@ -5,6 +5,7 @@ use warnings;
 use experimental "signatures";
 use Path::Tiny qw( path );
 use Path::Iterator::Rule qw();
+use HTML::Entities qw( encode_entities );
 
 my $data = get_data(
     my $root = path(__FILE__)->parent,
@@ -17,6 +18,8 @@ my $data = get_data(
 print "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>KENTNL's CPAN Fixes</title>";
 print render_style();
 print "</head><body>";
+print render_readme();
+print "<hr/>";
 print render_data($data);
 print "</body></html>";
 exit 0;
@@ -42,6 +45,7 @@ sub get_files( $dir ) {
     $frule->file();
     $frule->not( $frule->new->name('index.html') );
     $frule->not( $frule->new->name('mkindex.pl') );
+    $frule->not( $frule->new->name('README') );
     return $frule->all($dir);
 }
 
@@ -134,4 +138,9 @@ sub render_element ( $name, $content, $attributes ) {
 sub render_ahref ( $content, $attributes ) {
     return render_element( 'a', $content, $attributes );
 }
-
+sub render_readme {
+    return render_element('pre', encode_entities(path('README')->slurp_raw), {} );
+}
+sub render_hr {
+  return render_element('hr');
+}
